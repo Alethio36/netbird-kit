@@ -194,6 +194,7 @@ cmd_init() {
   NB_TLS_KEY_PATH=""
   NB_ACME_EMAIL=""
   NB_ACME_STAGING="false"
+  NB_ACME_CASERVER="https://acme-v02.api.letsencrypt.org/directory"
   if [[ "$NB_PROXY_MODE" == "bundled" ]]; then
     ask_menu NB_TLS_MODE "Certificate strategy for the bundled Traefik" \
       "dns01  - ACME DNS-01 (works on any port / behind NAT; needs DNS provider API creds)" \
@@ -310,11 +311,13 @@ ask_acme_staging() {
   echo
   warn "Let's Encrypt PRODUCTION has strict rate limits. Use STAGING while testing:"
   echo  "  it issues UNTRUSTED certs (browser warnings) but has generous limits."
-  echo  "  Switch to production with a re-init once your topology is confirmed working."
+  echo  "  Switch later with: ./netbird-kit.sh switch-prod"
   if ask_yesno "Use Let's Encrypt STAGING endpoint?" "n"; then
     NB_ACME_STAGING="true"
+    NB_ACME_CASERVER="https://acme-staging-v02.api.letsencrypt.org/directory"
   else
     NB_ACME_STAGING="false"
+    NB_ACME_CASERVER="https://acme-v02.api.letsencrypt.org/directory"
   fi
 }
 
@@ -362,7 +365,11 @@ NB_DASH_HOST_PORT=${NB_DASH_HOST_PORT}
 
 # --- Bundled Traefik / ACME ---
 NB_ACME_EMAIL=${NB_ACME_EMAIL}
+# Flip NB_ACME_STAGING + NB_ACME_CASERVER together, then wipe the cert store.
+#   staging: https://acme-staging-v02.api.letsencrypt.org/directory
+#   prod:    https://acme-v02.api.letsencrypt.org/directory
 NB_ACME_STAGING=${NB_ACME_STAGING}
+NB_ACME_CASERVER=${NB_ACME_CASERVER}
 NB_TLS_DNS_PROVIDER=${NB_TLS_DNS_PROVIDER}
 NB_TLS_CERT_PATH=${NB_TLS_CERT_PATH}
 NB_TLS_KEY_PATH=${NB_TLS_KEY_PATH}
@@ -483,9 +490,11 @@ YAML
 emit_traefik_service() {
   local tls_args="" extra_env="" extra_vol="" extra_ports=""
   # LE staging endpoint (untrusted certs, loose rate limits) when requested.
+  # caServer is always emitted as an env reference so switching staging <-> prod
+  # is a one-line .env edit (plus wiping the cert store), not a regeneration.
   local staging_arg=""
-  if [[ "${NB_ACME_STAGING:-false}" == "true" && "$NB_TLS_MODE" != "byocert" ]]; then
-    staging_arg=$'\n      - "--certificatesresolvers.le.acme.caserver=https://acme-staging-v02.api.letsencrypt.org/directory"'
+  if [[ "$NB_TLS_MODE" != "byocert" ]]; then
+    staging_arg=$'\n      - "--certificatesresolvers.le.acme.caserver=${NB_ACME_CASERVER}"'
   fi
   case "$NB_TLS_MODE" in
     dns01)
@@ -746,11 +755,10 @@ print_advice_idp() {
 print_advice_dns_or_tls() {
   if [[ "${NB_ACME_STAGING:-false}" == "true" ]]; then
     warn "ACME STAGING is enabled: certs will be issued by Let's Encrypt staging and"
-    echo  "  will show as UNTRUSTED in browsers. This is for testing only. When your"
-    echo  "  setup works, re-run './netbird-kit.sh init' choosing production, then"
-    echo  "  delete the staging cert store so a real cert is fetched:"
-    echo  "    docker compose down && docker volume rm netbird_netbird_traefik && ./netbird-kit.sh up"
-    echo  "  (for bind storage, delete the traefik data dir instead)."
+    echo  "  will show as UNTRUSTED in browsers. This is for testing only."
+    echo  "  When your setup works, switch to real certs with:"
+    echo  "    ./netbird-kit.sh switch-prod"
+    echo  "  (it flips the endpoint, clears the staging cert store, and restarts)."
     echo
   fi
   case "$NB_TLS_MODE" in
@@ -939,6 +947,55 @@ cmd_pin() {
   ( cd "$SCRIPT_DIR" && docker compose up -d )
 }
 
+
+cmd_switch_prod() {
+  require_docker; require_generated
+  local staging; staging="$(get_env NB_ACME_STAGING)"
+  if [[ "$staging" != "true" ]]; then
+    ok "Already using the Let's Encrypt production endpoint. Nothing to do."
+    return 0
+  fi
+  local tls_mode; tls_mode="$(get_env NB_TLS_MODE)"
+  if [[ "$tls_mode" == "byocert" || "$tls_mode" == "external-proxy" ]]; then
+    die "This deployment does not use ACME (mode: ${tls_mode}). Nothing to switch."
+  fi
+
+  warn "Switching to Let's Encrypt PRODUCTION."
+  echo  "  The existing staging certificate store will be DELETED so a real"
+  echo  "  certificate is requested. Peers and database data are NOT affected."
+  ask_yesno "Proceed?" "n" || die "Aborted."
+
+  set_env NB_ACME_STAGING "false"
+  set_env NB_ACME_CASERVER "https://acme-v02.api.letsencrypt.org/directory"
+  ok "Switched .env to the production endpoint."
+
+  info "Stopping Traefik and clearing the ACME cert store..."
+  ( cd "$SCRIPT_DIR" && docker compose stop traefik >/dev/null 2>&1 || true )
+
+  local storage proj
+  storage="$(get_env NB_STORAGE_MODE)"; proj="$(get_env NB_PROJECT)"
+  if [[ "$storage" == "bind" ]]; then
+    local base; base="$(get_env NB_DATA_BASE)"
+    rm -f "${base}/traefik/acme.json"
+    ok "Removed ${base}/traefik/acme.json"
+  else
+    ( cd "$SCRIPT_DIR" && docker compose rm -f traefik >/dev/null 2>&1 || true )
+    if docker volume rm "${proj}_netbird_traefik" >/dev/null 2>&1; then
+      ok "Removed volume ${proj}_netbird_traefik"
+    else
+      warn "Could not remove volume ${proj}_netbird_traefik automatically."
+      warn "If the cert stays untrusted, remove it manually and re-run 'up'."
+    fi
+  fi
+
+  info "Recreating with the production endpoint..."
+  ( cd "$SCRIPT_DIR" && docker compose up -d )
+  echo
+  ok "Done. Certificate issuance can take up to a couple of minutes."
+  echo  "  Watch it: docker compose logs -f traefik"
+  echo  "  Verify:   ./netbird-kit.sh health"
+}
+
 cmd_health() {
   require_docker; require_generated
   local exposed rc=0
@@ -998,6 +1055,127 @@ set_env() { # set_env KEY VALUE
   fi
 }
 
+
+# ---------------------------------------------------------------------------
+# Interactive menu (default when run with no arguments)
+# ---------------------------------------------------------------------------
+
+# Short status line so the menu shows what state the deployment is in.
+menu_status() {
+  if [[ ! -f "$ENV_FILE" ]]; then
+    printf '%s\n' "  Status: ${C_YEL}not configured${C_OFF} — run Setup first"
+    return
+  fi
+  local proj running total tls staging
+  proj="$(get_env NB_PROJECT)"
+  tls="$(get_env NB_TLS_MODE)"; staging="$(get_env NB_ACME_STAGING)"
+  printf '%s\n' "  Project: ${proj}   URL: $(get_env NB_EXPOSED_ADDRESS)"
+  local tls_label="$tls"
+  [[ "$staging" == "true" ]] && tls_label="${tls} ${C_YEL}(LE staging — untrusted)${C_OFF}"
+  printf '%s\n' "  TLS: ${tls_label}   STUN: udp/$(get_env NB_STUN_PORT)"
+  if command -v docker >/dev/null 2>&1; then
+    running="$( ( cd "$SCRIPT_DIR" && docker compose ps --status running -q 2>/dev/null ) | grep -c . || true )"
+    total="$( ( cd "$SCRIPT_DIR" && docker compose ps -a -q 2>/dev/null ) | grep -c . || true )"
+    if [[ "${running:-0}" -gt 0 ]]; then
+      printf '%s\n' "  Containers: ${C_GRN}${running}/${total} running${C_OFF}"
+    else
+      printf '%s\n' "  Containers: ${C_YEL}stopped${C_OFF}"
+    fi
+  fi
+}
+
+# Pause so command output stays readable before the menu redraws.
+menu_pause() {
+  echo
+  read -r -p "Press Enter to return to the menu..." _ || true
+}
+
+cmd_menu() {
+  local configured choice
+  while :; do
+    configured="no"; [[ -f "$ENV_FILE" ]] && configured="yes"
+
+    printf '\n'
+    hr
+    printf '%s\n' " ${C_BOLD}netbird-kit ${KIT_VERSION}${C_OFF}"
+    hr
+    menu_status
+    hr
+    if [[ "$configured" == "no" ]]; then
+      printf '%s\n' "  1) Setup (init)          Configure a new deployment"
+      printf '%s\n' "  q) Quit"
+      hr
+      read -r -p "Choose: " choice || true
+      case "$choice" in
+        1) cmd_init; menu_pause ;;
+        q|Q) return 0 ;;
+        *) warn "Unknown choice." ;;
+      esac
+      continue
+    fi
+
+    printf '%s\n' "  1) Start          (up)          Start the stack"
+    printf '%s\n' "  2) Health check   (health)      Verify containers, TLS/OIDC, STUN"
+    printf '%s\n' "  3) View logs                    Follow logs (Ctrl-C to stop)"
+    printf '%s\n' "  4) Stop           (down)        Stop, keep data"
+    printf '%s\n' "  5) Update         (update)      Back up, pull, recreate"
+    printf '%s\n' "  6) Pin versions   (pin)         Freeze image digests"
+    printf '%s\n' "  7) Switch to prod certs (switch-prod)"
+    printf '%s\n' "  8) Show setup advice again"
+    printf '%s\n' "  9) Reconfigure    (init)        ${C_YEL}regenerates config + secrets${C_OFF}"
+    printf '%s\n' "  0) Destroy        (destroy)     ${C_RED}delete all data${C_OFF}"
+    printf '%s\n' "  q) Quit"
+    hr
+    read -r -p "Choose: " choice || true
+    echo
+    case "$choice" in
+      1) cmd_up          || true; menu_pause ;;
+      2) cmd_health      || true; menu_pause ;;
+      3) menu_logs       || true; menu_pause ;;
+      4) cmd_down        || true; menu_pause ;;
+      5) cmd_update      || true; menu_pause ;;
+      6) cmd_pin         || true; menu_pause ;;
+      7) cmd_switch_prod || true; menu_pause ;;
+      8) menu_show_advice|| true; menu_pause ;;
+      9) cmd_init        || true; menu_pause ;;
+      0) cmd_destroy     || true; menu_pause ;;
+      q|Q) return 0 ;;
+      *) warn "Unknown choice." ;;
+    esac
+  done
+}
+
+menu_logs() {
+  require_docker; require_generated
+  local svc
+  ask_menu svc "Which logs?" "all" "netbird-server" "traefik" "dashboard" "postgres"
+  info "Following logs (Ctrl-C to return)..."
+  if [[ "$svc" == "all" ]]; then
+    ( cd "$SCRIPT_DIR" && docker compose logs -f --tail=50 ) || true
+  else
+    ( cd "$SCRIPT_DIR" && docker compose logs -f --tail=50 "$svc" ) || true
+  fi
+}
+
+# Re-print the post-init advice using values read back from .env.
+menu_show_advice() {
+  require_generated
+  NB_DOMAIN="$(get_env NB_DOMAIN)"
+  NB_PUBLIC_PORT="$(get_env NB_PUBLIC_PORT)"
+  NB_STUN_PORT="$(get_env NB_STUN_PORT)"
+  NB_PROXY_MODE="$(get_env NB_PROXY_MODE)"
+  NB_TLS_MODE="$(get_env NB_TLS_MODE)"
+  NB_EXT_PROXY_KIND="$(get_env NB_EXT_PROXY_KIND)"
+  NB_TLS_DNS_PROVIDER="$(get_env NB_TLS_DNS_PROVIDER)"
+  NB_TLS_CERT_PATH="$(get_env NB_TLS_CERT_PATH)"
+  NB_TLS_KEY_PATH="$(get_env NB_TLS_KEY_PATH)"
+  NB_ACME_STAGING="$(get_env NB_ACME_STAGING)"
+  NB_EXPOSED_ADDRESS="$(get_env NB_EXPOSED_ADDRESS)"
+  NB_HTTP_HOST_PORT="$(get_env NB_HTTP_HOST_PORT)"
+  NB_DASH_HOST_PORT="$(get_env NB_DASH_HOST_PORT)"
+  hr; print_advice; hr; print_next_steps
+}
+
 # ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
@@ -1007,11 +1185,14 @@ netbird-kit ${KIT_VERSION} — self-hosted NetBird deployment manager
 
 Usage: $0 <command>
 
+  (no args) Open the interactive menu
+  menu      Open the interactive menu
   init      Interactive setup: generates .env, config.yaml, docker-compose.yml
   up        Start the stack
   health    Verify containers, OIDC discovery, and STUN
   update    Back up, pull newer images, recreate, health-check
   pin       Freeze current image digests for reproducible redeploys
+  switch-prod  Move from Let's Encrypt staging to production certs
   down      Stop the stack (keeps data)
   destroy   Stop and DELETE all data (asks first)
   help      Show this help
@@ -1019,7 +1200,7 @@ USAGE
 }
 
 main() {
-  local cmd="${1:-help}"
+  local cmd="${1:-menu}"
   case "$cmd" in
     init)    cmd_init ;;
     up)      cmd_up ;;
@@ -1028,6 +1209,8 @@ main() {
     update)  cmd_update ;;
     pin)     cmd_pin ;;
     health)  cmd_health ;;
+    switch-prod) cmd_switch_prod ;;
+    menu)    cmd_menu ;;
     help|-h|--help) usage ;;
     *) usage; die "Unknown command: $cmd" ;;
   esac

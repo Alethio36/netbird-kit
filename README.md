@@ -6,14 +6,35 @@ If you just want NetBird on a fresh box that owns ports 80/443, the official `ge
 
 ## What it does
 
-One script, full lifecycle:
+Run it with no arguments for an **interactive menu** — status at the top, every operation as a numbered choice, so you never need to remember subcommands:
+
+```bash
+./netbird-kit.sh
+```
+
+```
+ netbird-kit 1.0.0
+----------------------------------------------------------------------
+  Project: netbird-kit   URL: https://netbird.example.com:12345
+  TLS: dns01 (LE staging — untrusted)   STUN: udp/13478
+  Containers: 4/4 running
+----------------------------------------------------------------------
+  1) Start          (up)          Start the stack
+  2) Health check   (health)      Verify containers, TLS/OIDC, STUN
+  3) View logs                    Follow logs (Ctrl-C to stop)
+  ...
+```
+
+Every menu entry is also a subcommand for scripting:
 
 | Command | Action |
 |---|---|
+| *(no args)* | Open the interactive menu |
 | `init` | Interactive Q&A → generates `.env`, `config.yaml`, `docker-compose.yml`, `dashboard.env` |
 | `up` | `docker compose up -d` |
 | `health` | Checks containers, OIDC discovery over TLS, and STUN listener |
 | `update` | Backs up config + `pg_dump`, pulls newer images, recreates, health-checks |
+| `switch-prod` | Moves from Let's Encrypt staging to production certs |
 | `pin` | Freezes current image **digests** into `.env` for reproducible redeploys |
 | `down` | Stops the stack (keeps data) |
 | `destroy` | Stops and **deletes** all data volumes (asks first) |
@@ -35,6 +56,7 @@ The stack: combined `netbird-server` (management + signal + relay + STUN) + dash
 ```bash
 git clone <your-repo-url> netbird-kit && cd netbird-kit
 chmod +x netbird-kit.sh
+./netbird-kit.sh           # interactive menu (or use subcommands below)
 ./netbird-kit.sh init      # answer the prompts
 # point DNS at this host, set up NAT per the advice init prints
 ./netbird-kit.sh up
@@ -76,6 +98,16 @@ This kit deploys NetBird's **built-in (embedded Dex) identity provider**, which 
 To use **Keycloak, Authentik, Google, Microsoft Entra, Okta**, or any other OIDC provider, add it **in the Dashboard** (Settings → Identity Provider), not in `config.yaml`. External providers run alongside local users, need no restart, and support optional JWT group sync so IdP groups map to NetBird groups.
 
 This isn't a limitation of the kit: the combined `netbird-server` container always enables the embedded IdP and it cannot be swapped out via configuration ([netbirdio/netbird#5335](https://github.com/netbirdio/netbird/issues/5335)). Replacing it entirely requires the older multi-container architecture, which NetBird is steering deployments away from. Adding an external provider in the Dashboard is the supported path. See the [Keycloak docs](https://docs.netbird.io/selfhosted/identity-providers/keycloak).
+
+## Staging → production certificates
+
+While testing, `init` can point Traefik at Let's Encrypt **staging** (untrusted certs, loose rate limits). When your topology works, switch to real certificates:
+
+```bash
+./netbird-kit.sh switch-prod
+```
+
+That flips `.env` to the production ACME endpoint, deletes the staging certificate store (Traefik will otherwise keep serving the cached staging cert), and recreates the stack. Peer and database data are untouched. Issuance takes up to a couple of minutes — watch with `docker compose logs -f traefik`, then confirm with `./netbird-kit.sh health`.
 
 ## Updating safely
 
