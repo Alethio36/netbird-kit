@@ -520,6 +520,13 @@ emit_traefik_service() {
       - "--providers.docker=true"
       - "--providers.docker.exposedbydefault=false"
       - "--entrypoints.websecure.address=:443"
+      # NetBird's Signal service uses a long-lived gRPC stream and the relay a
+      # long-lived WebSocket. Traefik's default responding timeouts terminate
+      # these on a ~60s cadence, which disrupts ICE offer/answer negotiation.
+      # 0 disables the timeouts.
+      - "--entrypoints.websecure.transport.respondingTimeouts.readTimeout=0"
+      - "--entrypoints.websecure.transport.respondingTimeouts.writeTimeout=0"
+      - "--entrypoints.websecure.transport.respondingTimeouts.idleTimeout=0"
 ${tls_args}
 ${extra_env}
     ports:
