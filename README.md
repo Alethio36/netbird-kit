@@ -22,6 +22,7 @@ The stack: combined `netbird-server` (management + signal + relay + STUN) + dash
 
 ## Configurable at `init`
 
+- **Compose project name** — namespaces the containers, volumes, and network so you can run this **alongside an existing NetBird deployment** on the same host without collisions.
 - **Public hostname and HTTPS port** — any port, single-origin enforced everywhere.
 - **STUN/UDP port** — change it if `3478` is taken.
 - **Reverse proxy** — bundled Traefik, *or* generate config advice for an existing proxy (pfSense/HAProxy, nginx, Caddy, external Traefik).
@@ -67,6 +68,14 @@ backups/<timestamp>/ # created by `update`
 ```
 
 Everything with secrets is git-ignored by default. **Back up `.env` and `config.yaml`** — the store `encryptionKey` is unrecoverable if lost.
+
+## Identity / SSO
+
+This kit deploys NetBird's **built-in (embedded Dex) identity provider**, which is fully functional on its own — create the first admin at `https://<host>:<port>/setup` and manage users from the Dashboard.
+
+To use **Keycloak, Authentik, Google, Microsoft Entra, Okta**, or any other OIDC provider, add it **in the Dashboard** (Settings → Identity Provider), not in `config.yaml`. External providers run alongside local users, need no restart, and support optional JWT group sync so IdP groups map to NetBird groups.
+
+This isn't a limitation of the kit: the combined `netbird-server` container always enables the embedded IdP and it cannot be swapped out via configuration ([netbirdio/netbird#5335](https://github.com/netbirdio/netbird/issues/5335)). Replacing it entirely requires the older multi-container architecture, which NetBird is steering deployments away from. Adding an external provider in the Dashboard is the supported path. See the [Keycloak docs](https://docs.netbird.io/selfhosted/identity-providers/keycloak).
 
 ## Updating safely
 
