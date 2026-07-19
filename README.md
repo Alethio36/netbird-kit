@@ -101,7 +101,11 @@ This isn't a limitation of the kit: the combined `netbird-server` container alwa
 
 ## Staging → production certificates
 
-While testing, `init` can point Traefik at Let's Encrypt **staging** (untrusted certs, loose rate limits). When your topology works, switch to real certificates:
+While testing, `init` can point Traefik at Let's Encrypt **staging** (untrusted certs, loose rate limits).
+
+> **NetBird clients cannot connect to a staging certificate.** Browsers let you click through the warning; the NetBird client does not, and has no bypass option. It fails with a misleading error like `failed to create auth client ... context deadline exceeded` rather than a certificate error. Use staging only to validate DNS, ports, and routing — switch to production **before** enrolling peers.
+
+When your topology works, switch to real certificates:
 
 ```bash
 ./netbird-kit.sh switch-prod

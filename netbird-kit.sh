@@ -756,7 +756,14 @@ print_advice_dns_or_tls() {
   if [[ "${NB_ACME_STAGING:-false}" == "true" ]]; then
     warn "ACME STAGING is enabled: certs will be issued by Let's Encrypt staging and"
     echo  "  will show as UNTRUSTED in browsers. This is for testing only."
-    echo  "  When your setup works, switch to real certs with:"
+    echo
+    warn "  NETBIRD CLIENTS CANNOT CONNECT TO A STAGING CERT."
+    echo  "  Browsers let you click through the warning; the NetBird client does"
+    echo  "  not, and has no bypass flag. It fails with an opaque error such as"
+    echo  "  'failed to create auth client ... context deadline exceeded' rather"
+    echo  "  than a clear certificate error, which is easy to misdiagnose."
+    echo  "  Use staging only to validate DNS, ports, and routing — then switch to"
+    echo  "  real certificates BEFORE enrolling any peers:"
     echo  "    ./netbird-kit.sh switch-prod"
     echo  "  (it flips the endpoint, clears the staging cert store, and restarts)."
     echo
@@ -963,6 +970,8 @@ cmd_switch_prod() {
   warn "Switching to Let's Encrypt PRODUCTION."
   echo  "  The existing staging certificate store will be DELETED so a real"
   echo  "  certificate is requested. Peers and database data are NOT affected."
+  echo  "  This is what allows NetBird clients to connect: they reject the"
+  echo  "  untrusted staging certificate with no way to override it."
   ask_yesno "Proceed?" "n" || die "Aborted."
 
   set_env NB_ACME_STAGING "false"
@@ -1012,6 +1021,7 @@ cmd_health() {
   if [[ "$staging" == "true" ]]; then
     curl_tls_opts+=(-k)
     warn "ACME staging enabled: cert is untrusted by design, verification skipped."
+    warn "NetBird clients will NOT be able to connect until you run 'switch-prod'."
   fi
 
   # On first boot netbird-server downloads GeoLite2/geonames before it starts
@@ -1098,7 +1108,7 @@ menu_status() {
   tls="$(get_env NB_TLS_MODE)"; staging="$(get_env NB_ACME_STAGING)"
   printf '%s\n' "  Project: ${proj}   URL: $(get_env NB_EXPOSED_ADDRESS)"
   local tls_label="$tls"
-  [[ "$staging" == "true" ]] && tls_label="${tls} ${C_YEL}(LE staging — untrusted)${C_OFF}"
+  [[ "$staging" == "true" ]] && tls_label="${tls} ${C_YEL}(LE staging — clients cannot connect)${C_OFF}"
   printf '%s\n' "  TLS: ${tls_label}   STUN: udp/$(get_env NB_STUN_PORT)"
   if command -v docker >/dev/null 2>&1; then
     running="$( ( cd "$SCRIPT_DIR" && docker compose ps --status running -q 2>/dev/null ) | grep -c . || true )"
