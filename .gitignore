@@ -1,0 +1,10 @@
+# Generated config + secrets — never commit these
+.env
+config.yaml
+docker-compose.yml
+dashboard.env
+traefik-dynamic.yml
+secrets/
+backups/
+data/
+*.tmp
