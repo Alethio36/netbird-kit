@@ -1013,11 +1013,38 @@ cmd_health() {
     curl_tls_opts+=(-k)
     warn "ACME staging enabled: cert is untrusted by design, verification skipped."
   fi
-  if curl -fsS "${curl_tls_opts[@]}" --max-time 10 \
-       "${exposed}/oauth2/.well-known/openid-configuration" | grep -q '"issuer"'; then
-    ok "Discovery document reachable and well-formed."
+
+  # On first boot netbird-server downloads GeoLite2/geonames before it starts
+  # listening, so Traefik returns 502 for a while. Retry rather than reporting
+  # a false failure; also covers slow ACME issuance on the very first request.
+  local attempt=1 max_attempts=12 wait_secs=10 discovery_ok="no"
+  while (( attempt <= max_attempts )); do
+    if curl -fsS "${curl_tls_opts[@]}" --max-time 10 \
+         "${exposed}/oauth2/.well-known/openid-configuration" 2>/dev/null \
+         | grep -q '"issuer"'; then
+      discovery_ok="yes"
+      break
+    fi
+    if (( attempt == 1 )); then
+      info "Not ready yet — retrying for up to $(( max_attempts * wait_secs ))s"
+      info "(first boot downloads geo databases before the server listens)"
+    fi
+    printf '    attempt %d/%d failed, waiting %ds...\n' \
+      "$attempt" "$max_attempts" "$wait_secs"
+    sleep "$wait_secs"
+    (( attempt++ ))
+  done
+
+  if [[ "$discovery_ok" == "yes" ]]; then
+    if (( attempt > 1 )); then
+      ok "Discovery document reachable and well-formed (ready after $(( (attempt - 1) * wait_secs ))s)."
+    else
+      ok "Discovery document reachable and well-formed."
+    fi
   else
-    warn "Discovery fetch failed. Check TLS, DNS, and the public port forward."
+    warn "Discovery fetch failed after $(( max_attempts * wait_secs ))s."
+    warn "Check: container logs (docker compose logs netbird-server), DNS for"
+    warn "${exposed%%:*}, the public port forward, and TLS/cert issuance."
     if [[ "$staging" != "true" ]]; then
       warn "If you are using a self-signed or staging cert, that is the likely cause."
     fi
